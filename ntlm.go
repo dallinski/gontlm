@@ -5,6 +5,7 @@ import (
 	"crypto/des"
 	"encoding/binary"
 	"errors"
+	"os"
 	"strings"
 	"unicode/utf16"
 )
@@ -80,16 +81,7 @@ func Negotiate() []byte {
 	return ret
 }
 
-func fromUTF16LE(d []byte) string {
-	u16 := make([]uint16, len(d)/2)
-	for i := 0; i < len(d); i += 2 {
-		u16 = append(u16, uint16(d[0])|uint16(d[1])<<8)
-	}
-
-	return string(utf16.Decode(u16))
-}
-
-func appendUTF16LE(v []byte, val string) []byte {
+func appendUTF16LE(val string) (v []byte) {
 	for _, r := range val {
 		if utf16.IsSurrogate(r) {
 			r1, r2 := utf16.EncodeRune(r)
@@ -99,7 +91,7 @@ func appendUTF16LE(v []byte, val string) []byte {
 			v = append16(v, uint16(r))
 		}
 	}
-	return v
+	return
 }
 
 func des56To64(dst, src []byte) {
@@ -126,7 +118,7 @@ func des56To64(dst, src []byte) {
 	}
 }
 
-func calcNTLMResponse(nonce [8]byte, hash [21]byte) [24]byte {
+func calcNTLMResponse(nonce []byte, hash [21]byte) [24]byte {
 	var ret [24]byte
 	var key [24]byte
 
@@ -135,18 +127,18 @@ func calcNTLMResponse(nonce [8]byte, hash [21]byte) [24]byte {
 	des56To64(key[16:], hash[14:])
 
 	blk, _ := des.NewCipher(key[:8])
-	blk.Encrypt(ret[:8], nonce[:])
+	blk.Encrypt(ret[:8], nonce)
 
 	blk, _ = des.NewCipher(key[8:16])
-	blk.Encrypt(ret[8:16], nonce[:])
+	blk.Encrypt(ret[8:16], nonce)
 
 	blk, _ = des.NewCipher(key[16:])
-	blk.Encrypt(ret[16:], nonce[:])
+	blk.Encrypt(ret[16:], nonce)
 
 	return ret
 }
 
-func calcLanManResponse(nonce [8]byte, password string) [24]byte {
+func calcLanManResponse(nonce []byte, password string) [24]byte {
 	var lmpass [14]byte
 	var key [16]byte
 	var hash [21]byte
@@ -165,36 +157,15 @@ func calcLanManResponse(nonce [8]byte, password string) [24]byte {
 	return calcNTLMResponse(nonce, hash)
 }
 
-func calcNTResponse(nonce [8]byte, password string) [24]byte {
+func calcNTResponse(nonce []byte, password string) [24]byte {
 	var hash [21]byte
 	h := md4.New()
-	h.Write(appendUTF16LE(nil, password))
+	h.Write(appendUTF16LE(password))
 	h.Sum(hash[:0])
 	return calcNTLMResponse(nonce, hash)
 }
 
-const (
-	dataWINSName    = 1
-	dataNTDomain    = 2
-	dataDNSName     = 3
-	dataWin2KDomain = 4
-)
-
-func Authenticate(chlg []byte, domain, user, password string) (v []byte, err error) {
-	defer func() {
-		if v := recover(); v != nil {
-			err, _ = v.(error)
-		}
-	}()
-
-	proto, chlg := consume(chlg, len("NTLMSSP\x00"))
-	if string(proto) != "NTLMSSP\x00" {
-		return nil, ErrProtocol
-	}
-
-	domain16 := appendUTF16LE(nil, domain)
-	user16 := appendUTF16LE(nil, user)
-
+func getAllData(chlg []byte) ([]byte, uint32, []byte) {
 	typ, chlg := consume32(chlg)       // Type 2
 	domainLen, chlg := consume16(chlg) // NT domain name length
 	_, chlg = consume16(chlg)          // NT domain name max length
@@ -205,67 +176,85 @@ func Authenticate(chlg []byte, domain, user, password string) (v []byte, err err
 	dataLen, chlg := consume16(chlg)   // length of data following domain
 	_, chlg = consume16(chlg)          // max length of data following domain
 	_, chlg = consume32(chlg)          // offset of data following domain
+	_, chlg = consume32(chlg)          // offset of data following domain
+	_, chlg = consume32(chlg)          // offset of data following domain
 
-	servdomain, chlg := consume(chlg, int(domainLen)) // server domain
+	_, chlg = consume(chlg, int(domainLen)) // server domain
 	alldata, chlg := consume(chlg, int(dataLen))
+	return alldata, typ, nonce
+}
 
-	print(servdomain)
+const (
+	dataWINSName    = 1
+	dataNTDomain    = 2
+	dataDNSName     = 3
+	dataWin2KDomain = 4
+	NTLMPREFIX      = "NTLMSSP\x00"
+)
+
+func Authenticate(chlg []byte, domain, user, password string) (v []byte, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err, _ = v.(error)
+		}
+	}()
+
+	if string(chlg[:len(NTLMPREFIX)]) != NTLMPREFIX {
+		return nil, ErrProtocol
+	}
+	chlg = chlg[len(NTLMPREFIX):]
+
+	domain16 := appendUTF16LE(domain)
+	hostname, _ := os.Hostname()
+
+	alldata, typ, nonce := getAllData(chlg)
 
 	if typ != 2 {
 		return nil, ErrProtocol
 	}
 
-	for len(alldata) > 0 {
-		typ, alldata := consume16(alldata) // type of this data item
-		length, alldata := consume16(alldata)
-		data, alldata := consume(alldata, int(length))
-
-		switch typ {
-		case dataWINSName:
-			print("wins", fromUTF16LE(data))
-		case dataNTDomain:
-			print("nt domain", fromUTF16LE(data))
-		case dataDNSName:
-			print("dns", fromUTF16LE(data))
-		case dataWin2KDomain:
-			print("win2k domain", fromUTF16LE(data))
-		}
+	for i := 0; i < 4; i++ {
+		var length uint16
+		_, alldata = consume16(alldata) // type of this data item
+		length, alldata = consume16(alldata)
+		_, alldata = consume(alldata, int(length))
 	}
 
-	var noncev [8]byte
-	copy(noncev[:], nonce)
+	lanman := calcLanManResponse(nonce, password)
+	nt := calcNTResponse(nonce, password)
 
-	lanman := calcLanManResponse(noncev, password)
-	nt := calcNTResponse(noncev, password)
-
-	auth := make([]byte, 48)
+	auth := make([]byte, 64)
 	copy(auth, []byte("NTLMSSP\x00"))
-	put32(auth[8:], 3) // type
+	put32(auth[8:], 3)                                       // type
+	put16(auth[12:], uint16(len(lanman)))                    // LanManager response length
+	put16(auth[14:], uint16(len(lanman)))                    // LanManager response max length
+	put16(auth[16:], uint16(0x40+len(domain16)))             // LanManager response offset
+	put16(auth[18:], 0)                                      // two bytes of zero
+	put16(auth[20:], uint16(len(nt)))                        // NT response length
+	put16(auth[22:], uint16(len(nt)))                        // NT response max length
+	put16(auth[24:], uint16(0x40+len(domain16)+len(lanman))) // NT repsonse offset
+	put16(auth[26:], 0)                                      // two bytes of zero
+	put16(auth[28:], uint16(len(domain16)))                  // username NT domain length
+	put16(auth[30:], uint16(len(domain16)))                  // username NT domain max length
+	put16(auth[32:], 0x70)                                   // username NT domain offset
+	put16(auth[34:], 0)                                      // two bytes of zero
+	put16(auth[36:], uint16(len(user)))                      // username length
+	put16(auth[38:], uint16(len(user)))                      // username max length
+	put16(auth[40:], uint16(0x70+len(domain16)))             // username offset
+	put16(auth[42:], 0)                                      // two bytes of zero
+	put16(auth[44:], uint16(len(hostname)))                  // local workstation name length
+	put16(auth[46:], uint16(len(hostname)))                  // local workstation name max length
+	put16(auth[48:], uint16(0x70+len(domain16)+len(user)))   // local workstation name offset
+	put16(auth[50:], 0)                                      // two bytes of zero
+	put16(auth[52:], 0)                                      // session key length
+	put16(auth[54:], 0)                                      // session key max length
+	put16(auth[56:], 0)                                      // message length
+	put16(auth[60:], 0x8201)                                 // flags
 
-	put16(auth[12:], uint16(len(lanman)))                              // LanManager response length
-	put16(auth[14:], uint16(len(lanman)))                              // LanManager response max length
-	put32(auth[16:], uint32(48+len(domain16)+len(user16)))             // LanManager response offset
-	put16(auth[20:], uint16(len(nt)))                                  // NT response length
-	put16(auth[22:], uint16(len(nt)))                                  // NT response max length
-	put32(auth[24:], uint32(48+len(domain16)+len(user16)+len(lanman))) // NT repsonse offset
-	put16(auth[28:], uint16(len(domain16)))                            // username NT domain length
-	put16(auth[30:], uint16(len(domain16)))                            // username NT domain max length
-	put32(auth[32:], 48)                                               // username NT domain offset
-	put16(auth[36:], uint16(len(user16)))                              // username length
-	put16(auth[38:], uint16(len(user16)))                              // username max length
-	put32(auth[40:], uint32(48+len(domain16)))                         // username offset
-	put16(auth[44:], 0)                                                // local workstation name length
-	put16(auth[46:], 0)                                                // local workstation name max length
-	put32(auth[48:], 0)                                                // local workstation name offset
-	put16(auth[52:], 0)                                                // session key length
-	put16(auth[54:], 0)                                                // session key max length
-	put32(auth[56:], 0)                                                // session key offset
-	put32(auth[60:], 0x8201)                                           // flags
-
-	auth = append(auth, domain16...)
-	auth = append(auth, user16...)
 	auth = append(auth, lanman[:]...)
 	auth = append(auth, nt[:]...)
+	auth = append(auth, user...)
+	auth = append(auth, hostname...)
 
 	return auth, nil
 }

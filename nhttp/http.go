@@ -3,9 +3,11 @@ package nhttp
 import (
 	"encoding/base64"
 	"github.com/jmckaskill/gontlm"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 )
 
 type Transport struct {
@@ -42,20 +44,26 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		sock, err := net.Dial("tcp", net.JoinHostPort(host, port))
+
 		if err != nil {
 			return nil, err
 		}
 
 		t.conn = httputil.NewClientConn(sock, nil)
-		req = cloneRequest(req)
-		req.Header.Set("Authorization", encBase64(ntlm.Negotiate()))
+		req.Header.Add("Authorization", "NTLM "+encBase64(ntlm.Negotiate()))
 	}
 
-	resp, err := t.conn.Do(req)
+	r, _ := http.NewRequest("POST", req.URL.String(), strings.NewReader(""))
+	r.Header.Add("Authorization", "NTLM "+encBase64(ntlm.Negotiate()))
+	resp, err := t.conn.Do(r)
+	// resp, err := t.conn.Do(req)
 
 	if err == nil && resp.StatusCode == http.StatusUnauthorized {
-		chlg, err := decBase64(resp.Header.Get("Www-Authenticate"))
+		withNTLMfront := resp.Header.Get("Www-Authenticate")
+		temp := strings.Replace(withNTLMfront, "NTLM ", "", -1)
+		chlg, err := decBase64(temp)
 		if err != nil {
+			log.Fatal(err)
 			return nil, err
 		}
 
@@ -64,9 +72,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 
-		req = cloneRequest(req)
-		req.Header.Set("Authorization", encBase64(auth))
-
+		req.Header.Set("Authorization", "NTLM "+encBase64(auth))
+		req.Header.Add("content-type", "text/xml")
 		resp, err = t.conn.Do(req)
 	}
 
