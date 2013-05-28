@@ -2,7 +2,7 @@ package nhttp
 
 import (
 	"encoding/base64"
-	"github.com/jmckaskill/gontlm"
+	"github.com/dallinski/gontlm"
 	"net"
 	"net/http"
 	"net/http/httputil"
